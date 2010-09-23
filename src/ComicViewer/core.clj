@@ -28,10 +28,6 @@
 (def resize-required? (ref true))
 (def current-file-directory (ref "."))
 
-(def main-frame (atom nil))
-(def main-timer (atom nil))
-(def page-panel (atom nil))
-
 (defn dec-resize-factor []
   (dosync
    (reset! image-resize-factor (max @image-resize-factor-down-threshold
@@ -108,9 +104,9 @@
   @current-page-image)
 
 
-(defn get-current-page-image-1 []
+(defn get-current-page-image-1 [panel]
   (with-image (get-current-page-image)
-    (with-JPanel @page-panel
+    (with-JPanel panel
       (println (format "%d %d %d %d %d %d %d %d"
 		       @image-clip-x
 		       @image-clip-y
@@ -126,9 +122,9 @@
 		    (min panel-height (- (- image-height 1) @image-clip-y))))))
 
 
-(defn move-clip-area [x y]
+(defn move-clip-area [page-panel x y]
   (with-image (get-current-page-image)
-    (with-JPanel @page-panel
+    (with-JPanel page-panel
       (dosync
        (let [new-clip-x (int (+ @image-clip-x (* x (get-wheel-speed))))
 	     new-clip-y (int (+ @image-clip-y (* y (get-wheel-speed))))]
@@ -239,7 +235,7 @@
 
 (defn paint-page-panel-1 [g panel]
   (with-JPanel panel
-    (with-image (get-current-page-image-1)
+    (with-image (get-current-page-image-1 panel)
       (let [resize-factor (get-resize-factor image-width
 					     image-height
 					     panel-width
@@ -250,46 +246,31 @@
 		    panel)
 	(draw-info g panel)))))
 
-(defn image-panel []
+(defn create-image-panel []
   (proxy [JPanel ActionListener] []
     (paintComponent [g]
 		    (proxy-super paintComponent g)
 		    (paint-page-panel-1 g this))
     (actionPerformed [e]
 		     (.repaint this)
-;;		     (println "timer action")
 		     )))
 
-(defn setup-gui []
-  (reset! main-frame (JFrame. "ComicViewer"))
-  (reset! main-timer (Timer. 100 nil))
-  (reset! page-panel (image-panel))
-  (.addActionListener @main-timer @page-panel)
-  (.setSize @main-frame 500 500)
-  (.setSize @page-panel 500 500)
-  (.add @main-frame @page-panel)
-  (.requestFocus @main-frame)
-  (.start @main-timer))
-
-(defn begin-gui []
-  (.setVisible @main-frame true))
-
-(defn destroy-gui []
-  (.stop @main-timer)
-  (.dispose @main-frame)
-  (close-current-zip-file)
-  (reset! page-panel nil)
-  (reset! main-timer nil)
-  (reset! main-frame nil))
-
+;;
+;; 이 함수는 모델 관련된 것이므로 나중에 위치 바꿀 것
+;;
 (defn open-file []
   (let [jfc (JFileChooser. @current-file-directory)]
-    (.showOpenDialog jfc @main-frame)
+    (.showOpenDialog jfc nil) ;; 나중에 frame-window 와 연계 필요
     (dosync
      (ref-set current-file-directory (.getCurrentDirectory jfc)))
     (open-zip-file (.getPath (.getSelectedFile jfc)))))
 
-(def main-frame-key-listener
+(defn destroy-gui [comps]
+  (.stop (:main-timer comps))
+  (.dispose (:frame-window comps))
+  (close-current-zip-file))
+
+(defn frame-window-key-listener [comps]
      (proxy [KeyListener] []
        (keyPressed [e]
 		   (let [key-code (.getKeyCode e)]
@@ -297,40 +278,65 @@
 			   (= key-code KeyEvent/VK_RIGHT) (go-next-page)
 			   (= key-code KeyEvent/VK_SLASH) (change-resize-behavior)
 			   (= key-code KeyEvent/VK_O) (open-file)
-			   (= key-code KeyEvent/VK_ESCAPE) (destroy-gui)
+			   (= key-code KeyEvent/VK_ESCAPE) (destroy-gui comps)
 			   (= key-code KeyEvent/VK_OPEN_BRACKET) (inc-resize-factor)
 			   (= key-code KeyEvent/VK_CLOSE_BRACKET) (dec-resize-factor)))
 		   (println (format "key %d pressed!" (.getKeyCode e))))
        (keyTyped [e])
        (keyReleased [e])))
 
-(def main-frame-wheel-listener
+(defn frame-window-wheel-listener [comps]
      (proxy [MouseWheelListener] []
        (mouseWheelMoved [e]
 			(println (.paramString e))
 			(let [mod (.getModifiers e)
 			      mod-ex (.getModifiersEx e)
-			      paranString (.paramString e)]
+			      paramString (.paramString e)]
 			  (if (and (= mod 0)
 				   (= mod-ex 0))
-			    (move-clip-area 0 (.getUnitsToScroll e))
+			    (move-clip-area (:page-panel comps)
+					    0 (.getUnitsToScroll e))
 			    (if (and (= mod 1)
 				     (= mod-ex 64))
-				     (move-clip-area (.getUnitsToScroll e) 0)))))))
+			      (move-clip-area (:page-panel comps)
+					      (.getUnitsToScroll e) 0)))))))
 
-(defn setup-actions []
-  (.addKeyListener @main-frame main-frame-key-listener)
-  (.addMouseWheelListener @main-frame main-frame-wheel-listener))
-  
+(defn setup-actions [comps]
+  (.addKeyListener (:frame-window comps)
+		   (frame-window-key-listener comps))
+  (.addMouseWheelListener (:frame-window comps)
+			  (frame-window-wheel-listener comps)))
+
+(defn initialize-gui [comps]
+  (.addActionListener (:main-timer comps) (:page-panel comps))
+  (.setSize (:frame-window comps) 500 500)
+  (.setSize (:page-panel comps) 500 500)
+  (.add (:frame-window comps) (:page-panel comps))
+  (setup-actions comps)
+  (.requestFocus (:frame-window comps))
+  (.start (:main-timer comps)))
+
+(defn create-gui-components []
+  {:main-timer (Timer. 100 nil)
+   :frame-window (JFrame. "ComicViewer")
+   :page-panel (create-image-panel)})
+
+(defn setup-gui []
+  (let [gui-components (create-gui-components)
+	destroy-gui (fn []
+		      (.stop (:main-timer gui-components))
+		      (.dispose (:frame-window gui-components))
+		      (close-current-zip-file))
+	]
+    (initialize-gui gui-components)
+    (.setVisible (:frame-window gui-components) true)))
+
 (defn setup-application []
   (setup-model)
-  (setup-gui)
-  (setup-actions))
+  (setup-gui))
 
 (defn start-appl []
-  (setup-application)
-  (begin-gui))
+  (setup-application))
 
 ;; (defn -main [& arg]
 ;;   (start-gui))
-
